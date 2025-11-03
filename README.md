@@ -214,3 +214,25 @@ public class As4MessageService {
         return ZonedDateTime.now(java.time.ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT);
     }
 }
+
+
+return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+       "<StandardBusinessDocumentHeader xmlns=\"http://www.unece.org/cefact/namespaces/StandardBusinessDocumentHeader\">\n" +
+       "  <HeaderVersion>1.0</HeaderVersion>\n" +
+       "  <Sender><Identifier Authority=\"HR:OIB\">" + senderOib + "</Identifier></Sender>\n" +
+       "  <Receiver><Identifier Authority=\"HR:OIB\">" + receiverOib + "</Identifier></Receiver>\n" +
+       "  <DocumentIdentification>\n" +
+       "    <Standard>UBL</Standard>\n" +
+       "    <Type>Invoice</Type>\n" +
+       "    <TypeVersion>2.1</TypeVersion>\n" +
+       "    <InstanceIdentifier>" + invoiceId + "</InstanceIdentifier>\n" +
+       "    <CreationDateAndTime>" + currentUtc() + "</CreationDateAndTime>\n" +
+       "  </DocumentIdentification>\n" +
+       "  <BusinessScope>\n" +
+       "    <Scope>\n" +
+       "      <Type>PROCESSID</Type>\n" +
+       "      <InstanceIdentifier>urn:fdc:peppol.eu:poacc:billing:3</InstanceIdentifier>\n" +
+       "    </Scope>\n" +
+       "  </BusinessScope>\n" +
+       "</StandardBusinessDocumentHeader>";
+
