@@ -381,3 +381,18 @@ public class TestAs4Send {
     }
   ]
 }
+
+
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "communityServerConnector",
+      "name": "Run Tomcat Server (Debug Mode)",
+      "request": "launch",
+      "serverId": "tomcat90x",
+      "debugPort": 8000,
+      "timeout": 120000
+    }
+  ]
+}
