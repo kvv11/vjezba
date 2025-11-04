@@ -1,208 +1,221 @@
-import jakarta.xml.soap.*;
+import org.json.JSONObject;
+
+import javax.activation.DataHandler;
+import javax.activation.DataSource;
+import javax.activation.ByteArrayDataSource;
+
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.transform.*;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
+
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.UUID;
+import java.util.*;
 import java.util.zip.GZIPOutputStream;
 
-/**
- * Full As4MessageService - prošireno (wsu:Id, PartProperties za SBDH i Invoice, dummy WS-Security/ds)
- * Generira byte[] koji predstavlja AS4 multipart/related MIME poruku (SOAP part + attachments).
- *
- * Napomena: ovo je STRUKTURALNO kompletna AS4 poruka prema FINA dokumentaciji.
- * Potpis (WS-Security) je dummy i treba ga zamijeniti stvarnim XAdES potpisom.
- */
+
 public class As4MessageService {
 
-    private static final String EB_NS = "http://docs.oasis-open.org/ebxml-msg/ebms/v3.0/ns/core/200704/";
+    // ebMS3 / WS-* konstante
+    private static final String EB_NS   = "http://docs.oasis-open.org/ebxml-msg/ebms/v3.0/ns/core/200704/";
     private static final String WSSE_NS = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd";
-    private static final String WSU_NS = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd";
-    private static final String DS_NS = "http://www.w3.org/2000/09/xmldsig#";
+    private static final String WSU_NS  = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd";
+    private static final String SOAP12  = "http://www.w3.org/2003/05/soap-envelope";
 
-    /**
-     * Kreira AS4 poruku kao byte[] (MIME multipart/related). Sadrzi:
-     *  - SOAP 1.2 envelope s eb:Messaging (wsu:Id postavljen)
-     *  - eb:UserMessage s MessageInfo, PartyInfo, CollaborationInfo, PayloadInfo (PartInfo za sbdh i invoice)
-     *  - wsse:Security placeholder s ds:Signature placeholder (referira wsu:Id)
-     *  - attachment: sbdh.xml (application/xml)
-     *  - attachment: invoice.xml (gzipirani UBL, application/octet-stream) + CompressionType u PartProperties
-     *
-     * I/O: ublXmlBytes - sirovi UBL XML (nekompresiran)
-     */
-    public byte[] createAs4Message(byte[] ublXmlBytes,
-                                   String senderOib,
-                                   String receiverOib,
-                                   String invoiceId) throws Exception {
 
-        // 1) gzipiraj UBL (FINA zahtjeva compress za invoice dio)
+    public byte[] createAndSignAs4Invoice(byte[] ublXmlBytes,
+                                          String senderOib,
+                                          String receiverOib,
+                                          String documentId) throws Exception {
+
+        // gzip xml-a
         byte[] gzipInvoice = gzip(ublXmlBytes);
+        
+        
+        // TODO: za invoice promjeniti type i proccesid, ovo je za test racuna 
+        final String sbdhXml = buildSbdhXml(senderOib, receiverOib, documentId,
+                "Invoice", "urn:fdc:peppol.eu:poacc:billing:3");
 
-        // 2) kreiraj SBDH XML (možeš prilagodit polja)
-        String sbdhXml = createSbdhXml(senderOib, receiverOib, invoiceId);
-
-        // 3) napravimo SOAPMessage
+        // soap 1_2 poruka
         MessageFactory mf = MessageFactory.newInstance(SOAPConstants.SOAP_1_2_PROTOCOL);
-        SOAPMessage soapMessage = mf.createMessage();
-        SOAPPart soapPart = soapMessage.getSOAPPart();
-        SOAPEnvelope envelope = soapPart.getEnvelope();
-        SOAPHeader header = envelope.getHeader();
+        SOAPMessage soap = mf.createMessage();
+        SOAPEnvelope env = soap.getSOAPPart().getEnvelope();
+        SOAPHeader head = env.getHeader();
 
-        // Namespaces
-        envelope.addNamespaceDeclaration("eb", EB_NS);
-        envelope.addNamespaceDeclaration("wsse", WSSE_NS);
-        envelope.addNamespaceDeclaration("wsu", WSU_NS);
-        envelope.addNamespaceDeclaration("ds", DS_NS);
+        env.addNamespaceDeclaration("eb",   EB_NS);
+        env.addNamespaceDeclaration("wsse", WSSE_NS);
+        env.addNamespaceDeclaration("wsu",  WSU_NS);
 
-        // eb:Messaging (postavi wsu:Id jer ce potpis referencirati ovaj element)
-        SOAPElement messaging = header.addChildElement("Messaging", "eb");
-        messaging.addAttribute(envelope.createName("Id", "wsu", WSU_NS), "Messaging-" + UUID.randomUUID());
-        // opcionalno: mustUnderstand
-        messaging.addAttribute(envelope.createName("mustUnderstand", "env", "http://www.w3.org/2003/05/soap-envelope"), "true");
+        // eb:Messaging - provjerit ovo jel ima nekakva formula za uuid ili moze random 
+        SOAPElement messaging = head.addChildElement("Messaging", "eb");
+        final String messagingId = "Messaging-" + UUID.randomUUID();
+        messaging.addAttribute(env.createName("Id", "wsu", WSU_NS), messagingId);
+        messaging.addAttribute(env.createName("mustUnderstand", "env", SOAP12), "true");
 
-        SOAPElement userMessage = messaging.addChildElement("UserMessage", "eb");
-        userMessage.addAttribute(envelope.createName("mpc"),
+        // usermessage
+        SOAPElement userMsg = messaging.addChildElement("UserMessage", "eb");
+        // MPC – defaultMPC (HR profil dopušta default)
+        userMsg.addAttribute(env.createName("mpc"),
                 "http://docs.oasis-open.org/ebxml-msg/ebms/v3.0/ns/core/200704/defaultMPC");
 
-        // MessageInfo (Timestamp i MessageId)
-        SOAPElement messageInfo = userMessage.addChildElement("MessageInfo", "eb");
-        SOAPElement timestamp = messageInfo.addChildElement("Timestamp", "eb");
-        timestamp.addTextNode(currentUtc());
-        messageInfo.addChildElement("MessageId", "eb").addTextNode("uuid:" + UUID.randomUUID());
+        // messageinfo
+        SOAPElement mi = userMsg.addChildElement("MessageInfo", "eb");
+        mi.addChildElement("Timestamp", "eb").addTextNode(nowUtc());
+        mi.addChildElement("MessageId", "eb").addTextNode("uuid:" + UUID.randomUUID());
 
-        // PartyInfo (From/To)
-        SOAPElement partyInfo = userMessage.addChildElement("PartyInfo", "eb");
-        addParty(envelope, partyInfo, "From", senderOib, "http://docs.oasis-open.org/ebxml-msg/ebms/v3.0/ns/core/initiator");
-        addParty(envelope, partyInfo, "To", receiverOib, "http://docs.oasis-open.org/ebxml-msg/ebms/v3.0/ns/core/responder");
+        // partyinfo 
+        SOAPElement pi = userMsg.addChildElement("PartyInfo", "eb");
+        addParty(env, pi, "From", "0088:" + senderOib, EB_NS + "/initiator");
+        addParty(env, pi, "To",   "0088:" + receiverOib, EB_NS + "/responder");
 
-        // CollaborationInfo (Service, Action, ConversationId, AgreementRef opcionalno)
-        SOAPElement collab = userMessage.addChildElement("CollaborationInfo", "eb");
+        // collaborationinfo
+        SOAPElement collab = userMsg.addChildElement("CollaborationInfo", "eb");
+        // TODO izmjeniti za service/action dinamicki za invoice/odobrenje
         SOAPElement service = collab.addChildElement("Service", "eb");
         service.addTextNode("cenbii-procid-ubl");
-        service.addAttribute(envelope.createName("type"), "cenbii-procid-ubl");
+        service.addAttribute(env.createName("type"), "cenbii-procid-ubl");
+
         SOAPElement action = collab.addChildElement("Action", "eb");
         action.addTextNode("busdox-docid-qns::urn:oasis:names:specification:ubl:schema:xsd:Invoice-2::Invoice");
+
         collab.addChildElement("ConversationId", "eb").addTextNode("conv-" + UUID.randomUUID());
-        collab.addChildElement("AgreementRef", "eb").addTextNode("urn:fdc:eracun.hr:2023:agreements:ap_provider"); // probno
+        // (Opcionalno) AgreementRef – prema lokalnom dogovoru/PMode
+        // collab.addChildElement("AgreementRef", "eb").addTextNode("urn:fdc:eracun.hr:agreements:ap_provider");
 
-        // MessageProperties (originalSender, finalRecipient)
-        SOAPElement msgProps = userMessage.addChildElement("MessageProperties", "eb");
-        addProperty(envelope, msgProps, "originalSender", "urn:oasis:names:tc:ebcore:partyid-type:iso6523:0088", "0088:" + senderOib);
-        addProperty(envelope, msgProps, "finalRecipient", "urn:oasis:names:tc:ebcore:partyid-type:iso6523:0088", "0088:" + receiverOib);
+        // mess properties
+        SOAPElement props = userMsg.addChildElement("MessageProperties", "eb");
+        addProperty(env, props, "originalSender",
+                "urn:oasis:names:tc:ebcore:partyid-type:iso6523:0088", "0088:" + senderOib);
+        addProperty(env, props, "finalRecipient",
+                "urn:oasis:names:tc:ebcore:partyid-type:iso6523:0088", "0088:" + receiverOib);
 
-        // PayloadInfo: navedemo PartInfo za sbdh i za invoice (u tom redoslijedu)
-        SOAPElement payloadInfo = userMessage.addChildElement("PayloadInfo", "eb");
+        // payload info sbdh i gzipoan fajl
+        SOAPElement payload = userMsg.addChildElement("PayloadInfo", "eb");
 
-        // PartInfo -> SBDH (nekomprimirano, application/xml)
-        SOAPElement partSbdh = payloadInfo.addChildElement("PartInfo", "eb");
-        partSbdh.addAttribute(envelope.createName("href"), "cid:sbdh.xml");
-        SOAPElement sbdhProps = partSbdh.addChildElement("PartProperties", "eb");
-        addProperty(envelope, sbdhProps, "MimeType", null, "application/xml");
-        // SBDH obicno NIJE compressan — ne stavljamo CompressionType za sbdh
+        // SBDH part – NE komprimiran, application/xml
+        SOAPElement partSbdh = payload.addChildElement("PartInfo", "eb");
+        partSbdh.addAttribute(env.createName("href"), "cid:sbdh.xml");
+        SOAPElement sbdhPP = partSbdh.addChildElement("PartProperties", "eb");
+        addSimpleProperty(env, sbdhPP, "MimeType", "application/xml");
 
-        // PartInfo -> Invoice (gzipiran)
-        SOAPElement partInvoice = payloadInfo.addChildElement("PartInfo", "eb");
-        partInvoice.addAttribute(envelope.createName("href"), "cid:invoice.xml");
-        SOAPElement invoiceProps = partInvoice.addChildElement("PartProperties", "eb");
-        addProperty(envelope, invoiceProps, "MimeType", null, "text/xml");
-        addProperty(envelope, invoiceProps, "CompressionType", null, "application/gzip");
+        // Invoice part – GZIP, application/octet-stream; PartProperties: MimeType=text/xml + CompressionType=application/gzip
+        SOAPElement partInv = payload.addChildElement("PartInfo", "eb");
+        partInv.addAttribute(env.createName("href"), "cid:invoice.xml");
+        SOAPElement invPP = partInv.addChildElement("PartProperties", "eb");
+        addSimpleProperty(env, invPP, "MimeType", "text/xml");
+        addSimpleProperty(env, invPP, "CompressionType", "application/gzip");
 
-        // WS-Security header (placeholder): BinarySecurityToken + Signature placeholder
-        SOAPElement security = header.addChildElement("Security", "wsse");
-        security.addAttribute(envelope.createName("mustUnderstand", "env", "http://www.w3.org/2003/05/soap-envelope"), "true");
-        // BinarySecurityToken (placeholder) - u produkciji zamijeniti sa stvarnim Base64 certifikatom
-        SOAPElement bst = security.addChildElement("BinarySecurityToken", "wsse");
-        bst.addAttribute(envelope.createName("EncodingType"), "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary");
-        bst.addAttribute(envelope.createName("ValueType"), "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3");
-        bst.addAttribute(envelope.createName("Id", "wsu", WSU_NS), "X509-" + UUID.randomUUID());
-        bst.addTextNode("MIID-DUMMY-BASE64-CERT=="); // DUMMY: zamijeni s pravim certifikatom (Base64)
+        // ws security - za potpis - kasnije dodajemo
+        SOAPElement wsse = head.addChildElement("Security", "wsse");
+        wsse.addAttribute(env.createName("mustUnderstand", "env", SOAP12), "true");
 
-        // ds:Signature placeholder - važno: referencira eb:Messaging (wsu:Id)
-        SOAPElement signature = security.addChildElement("Signature", "ds");
-        SOAPElement signedInfo = signature.addChildElement("SignedInfo", "ds");
-        signedInfo.addChildElement("CanonicalizationMethod", "ds")
-                .addAttribute(envelope.createName("Algorithm"), "http://www.w3.org/2001/10/xml-exc-c14n#");
-        signedInfo.addChildElement("SignatureMethod", "ds")
-                .addAttribute(envelope.createName("Algorithm"), "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256");
+        // attachmenti
+        DataSource dsSbdh = new ByteArrayDataSource(sbdhXml.getBytes(StandardCharsets.UTF_8),
+                "application/xml; charset=UTF-8");
+        AttachmentPart attSbdh = soap.createAttachmentPart(new DataHandler(dsSbdh));
+        attSbdh.setContentId("<sbdh.xml>");
+        soap.addAttachmentPart(attSbdh);
 
-        // Reference to Messaging element (wo/ actual digest — placeholder)
-        SOAPElement reference = signedInfo.addChildElement("Reference", "ds");
-        // find messaging wsu:Id value previously set:
-        String messagingId = messaging.getAttribute(envelope.createName("Id", "wsu", WSU_NS).getLocalName());
-        // If we couldn't get attribute via getAttribute, safer to recompute: but we set it earlier; to be safe, set a variable above.
-        // For clarity, we'll just reference "#Messaging-REF" as placeholder
-        reference.addAttribute(envelope.createName("URI"), "#Messaging-REF");
-        reference.addChildElement("Transforms", "ds").addChildElement("Transform", "ds")
-                .addAttribute(envelope.createName("Algorithm"), "http://www.w3.org/2000/09/xmldsig#enveloped-signature");
-        reference.addChildElement("DigestMethod", "ds")
-                .addAttribute(envelope.createName("Algorithm"), "http://www.w3.org/2001/04/xmlenc#sha256");
-        reference.addChildElement("DigestValue", "ds").addTextNode("DUMMY_DIGEST_VALUE==");
+        DataSource dsInv = new ByteArrayDataSource(gzipInvoice, "application/octet-stream");
+        AttachmentPart attInv = soap.createAttachmentPart(new DataHandler(dsInv));
+        attInv.setContentId("<invoice.xml>");
+        soap.addAttachmentPart(attInv);
 
-        signature.addChildElement("SignatureValue", "ds").addTextNode("DUMMY_SIGNATURE_VALUE==");
-        SOAPElement keyInfo = signature.addChildElement("KeyInfo", "ds");
-        keyInfo.addChildElement("KeyName", "ds").addTextNode("DummyKey");
+        soap.saveChanges();
 
-        // 4) attachments: sbdh.xml (application/xml) i gzipirani invoice (application/octet-stream)
-        AttachmentPart sbdhAttachment = soapMessage.createAttachmentPart();
-        sbdhAttachment.setContent(sbdhXml, "application/xml; charset=UTF-8");
-        sbdhAttachment.setContentId("<sbdh.xml>");
-        soapMessage.addAttachmentPart(sbdhAttachment);
+        // potpisivanje 
+        String messagingXml = extractElementXml(messaging);
+        // ovo vidjet u potpisivanju xml-a i prepisat tako 
+        List<String> allowedCerts = null;     
+        String serialNumber       = null;    
+        String issuer             = null;     
 
-        AttachmentPart invoiceAttachment = soapMessage.createAttachmentPart();
-        invoiceAttachment.setContent(gzipInvoice, "application/octet-stream");
-        invoiceAttachment.setContentId("<invoice.xml>");
-        soapMessage.addAttachmentPart(invoiceAttachment);
+        GenerateAuthorizationKeyBean authBean =
+                SignatureUtils.generateAuthorizationKey(messagingXml, allowedCerts, serialNumber, issuer);
 
-        // 5) Serialize to byte[]
+        if (authBean == null || authBean.getErrorId() != null) {
+            throw new IllegalStateException("Potpisni servis greška: " +
+                    (authBean == null ? "null" : authBean.getErrorMsg()));
+        }
+
+        // povlacme potpisa
+        String signedXml = SignatureUtils.pullData(authBean.getAuthKey(), authBean.getIdZhtvRq());
+        if (signedXml == null || signedXml.trim().isEmpty()) {
+            throw new IllegalStateException("Potpisni servis vratio prazan potpis (signedXml).");
+        }
+
+        // insert potpisa u wse
+        appendSignatureXml(wsse, signedXml);
+
+        soap.saveChanges();
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        soapMessage.saveChanges(); // osiguraj update headers
-        soapMessage.writeTo(bos);
-        return bos.toByteArray();
+        soap.writeTo(bos);
+        byte[] mimeBytes = bos.toByteArray();
+
+        return mimeBytes;
     }
+──────────────
 
-    // --- HELPERS ---
-
-    private void addParty(SOAPEnvelope env, SOAPElement parent, String tag, String oib, String role) throws SOAPException {
+    private static void addParty(SOAPEnvelope env, SOAPElement parent, String tag, String iso6523PartyId, String role)
+            throws SOAPException {
         SOAPElement node = parent.addChildElement(tag, "eb");
         SOAPElement partyId = node.addChildElement("PartyId", "eb");
-        // koristimo probni DN format; u produkciji ubaci stvarni DN/CN kako PMode trazi
-        partyId.addTextNode("C=HR,O=" + tag + ",CN=" + oib);
-        partyId.addAttribute(env.createName("type"), "urn:oasis:names:tc:ebcore:partyid-type:unregistered");
+        partyId.addTextNode(iso6523PartyId);
+        partyId.addAttribute(env.createName("type"), "urn:oasis:names:tc:ebcore:partyid-type:iso6523:0088");
         node.addChildElement("Role", "eb").addTextNode(role);
     }
 
-    private void addProperty(SOAPEnvelope env, SOAPElement parent, String name, String type, String value) throws SOAPException {
+    private static void addProperty(SOAPEnvelope env, SOAPElement parent, String name, String type, String value)
+            throws SOAPException {
         SOAPElement prop = parent.addChildElement("Property", "eb");
         prop.addAttribute(env.createName("name"), name);
         if (type != null) prop.addAttribute(env.createName("type"), type);
         prop.addTextNode(value);
     }
 
-    private String createSbdhXml(String senderOib, String receiverOib, String invoiceId) {
-        return """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <StandardBusinessDocumentHeader xmlns="http://www.unece.org/cefact/namespaces/StandardBusinessDocumentHeader">
-          <HeaderVersion>1.0</HeaderVersion>
-          <Sender><Identifier Authority="HR:OIB">%s</Identifier></Sender>
-          <Receiver><Identifier Authority="HR:OIB">%s</Identifier></Receiver>
-          <DocumentIdentification>
-            <Standard>UBL</Standard>
-            <Type>Invoice</Type>
-            <TypeVersion>2.1</TypeVersion>
-            <InstanceIdentifier>%s</InstanceIdentifier>
-            <CreationDateAndTime>%s</CreationDateAndTime>
-          </DocumentIdentification>
-          <BusinessScope>
-            <Scope>
-              <Type>PROCESSID</Type>
-              <InstanceIdentifier>urn:fdc:peppol.eu:poacc:billing:3</InstanceIdentifier>
-            </Scope>
-          </BusinessScope>
-        </StandardBusinessDocumentHeader>
-        """.formatted(senderOib, receiverOib, invoiceId, currentUtc());
+    private static void addSimpleProperty(SOAPEnvelope env, SOAPElement parent, String name, String value)
+            throws SOAPException {
+        SOAPElement prop = parent.addChildElement("Property", "eb");
+        prop.addAttribute(env.createName("name"), name);
+        prop.addTextNode(value);
     }
 
-    private byte[] gzip(byte[] data) throws IOException {
+    private static String buildSbdhXml(String senderOib, String receiverOib,
+                                       String instanceId, String type, String processId) {
+        StringBuilder sb = new StringBuilder(512);
+        sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+          .append("<StandardBusinessDocumentHeader xmlns=\"http://www.unece.org/cefact/namespaces/StandardBusinessDocumentHeader\">\n")
+          .append("  <HeaderVersion>1.0</HeaderVersion>\n")
+          .append("  <Sender><Identifier Authority=\"HR:OIB\">").append(senderOib).append("</Identifier></Sender>\n")
+          .append("  <Receiver><Identifier Authority=\"HR:OIB\">").append(receiverOib).append("</Identifier></Receiver>\n")
+          .append("  <DocumentIdentification>\n")
+          .append("    <Standard>UBL</Standard>\n")
+          .append("    <Type>").append(type).append("</Type>\n")
+          .append("    <TypeVersion>2.1</TypeVersion>\n")
+          .append("    <InstanceIdentifier>").append(instanceId).append("</InstanceIdentifier>\n")
+          .append("    <CreationDateAndTime>").append(nowUtc()).append("</CreationDateAndTime>\n")
+          .append("  </DocumentIdentification>\n")
+          .append("  <BusinessScope>\n")
+          .append("    <Scope>\n")
+          .append("      <Type>PROCESSID</Type>\n")
+          .append("      <InstanceIdentifier>").append(processId).append("</InstanceIdentifier>\n")
+          .append("    </Scope>\n")
+          .append("  </BusinessScope>\n")
+          .append("</StandardBusinessDocumentHeader>\n");
+        return sb.toString();
+    }
+
+    private static String nowUtc() {
+        return ZonedDateTime.now(java.time.ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT);
+    }
+
+    private static byte[] gzip(byte[] data) throws IOException {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         try (GZIPOutputStream gz = new GZIPOutputStream(bos)) {
             gz.write(data);
@@ -210,29 +223,132 @@ public class As4MessageService {
         return bos.toByteArray();
     }
 
-    private String currentUtc() {
-        return ZonedDateTime.now(java.time.ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT);
+    private static String extractElementXml(SOAPElement element) throws Exception {
+        Transformer tr = TransformerFactory.newInstance().newTransformer();
+        tr.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "no");
+        tr.setOutputProperty(OutputKeys.INDENT, "no");
+        StringWriter sw = new StringWriter();
+        tr.transform(new DOMSource(element), new StreamResult(sw));
+        return sw.toString();
+    }
+
+    private static void appendSignatureXml(SOAPElement wsseSecurity, String signatureXml) throws Exception {
+        DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+        dbf.setNamespaceAware(true);
+        org.w3c.dom.Document sigDoc = dbf.newDocumentBuilder()
+                .parse(new ByteArrayInputStream(signatureXml.getBytes(StandardCharsets.UTF_8)));
+        Node imported = wsseSecurity.getOwnerDocument().importNode(sigDoc.getDocumentElement(), true);
+        wsseSecurity.appendChild(imported);
+    }
+
+    private static void writeToDesktop(byte[] content, String fileName) {
+        try {
+            File outDir = new File(System.getProperty("user.home"), "Desktop/TestAs4");
+            if (!outDir.exists()) outDir.mkdirs();
+            File f = new File(outDir, fileName);
+            try (FileOutputStream fos = new FileOutputStream(f)) {
+                fos.write(content);
+            }
+            System.out.println("✅ AS4 zapisano: " + f.getAbsolutePath());
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // sender 
+import java.io.*;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+
+public class SendAs4Service {
+
+    /**
+     * Šalje AS4 MIME poruku (byte[]) prema Domibus endpointu putem HTTP POST zahtjeva.
+     *
+     * @param as4MessageBytes  byte[] koji je generiran iz As4MessageService.createAndSignAs4Invoice(...)
+     * @param endpointUrl      URL Domibus endpointa (npr. https://test.domibus.fina.hr/domibus/services/msh)
+     * @return                 String odgovor (obično AS4 Receipt XML)
+     */
+    public String sendToDomibus(byte[] as4MessageBytes, String endpointUrl) throws IOException {
+
+        // TODO: Ako koristiš HTTPS, obavezno prije poziva postavi keystore/truststore:
+        // System.setProperty("javax.net.ssl.keyStore", "path/to/keystore.jks");
+        // System.setProperty("javax.net.ssl.keyStorePassword", "lozinka");
+        // System.setProperty("javax.net.ssl.trustStore", "path/to/truststore.jks");
+        // System.setProperty("javax.net.ssl.trustStorePassword", "lozinka");
+
+        System.out.println("📤 Slanje AS4 poruke na endpoint: " + endpointUrl);
+
+        URL url = new URL(endpointUrl);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+
+        conn.setDoOutput(true);
+        conn.setRequestMethod("POST");
+
+        // Ključni headeri koje Domibus očekuje
+        conn.setRequestProperty("Content-Type",
+                "multipart/related; type=\"application/soap+xml\"; boundary=\"----=_Part_0\"");
+        conn.setRequestProperty("SOAPAction", "");
+        conn.setRequestProperty("User-Agent", "Java-AS4-Client/1.0");
+        conn.setRequestProperty("Connection", "Keep-Alive");
+
+        // Zapisujemo bajtove poruke u tijelo zahtjeva
+        try (OutputStream os = conn.getOutputStream()) {
+            os.write(as4MessageBytes);
+            os.flush();
+        }
+
+        // Provjera odgovora
+        int status = conn.getResponseCode();
+        System.out.println("📨 HTTP status: " + status);
+
+        InputStream responseStream = (status >= 200 && status < 300)
+                ? conn.getInputStream()
+                : conn.getErrorStream();
+
+        String response = readStream(responseStream);
+
+        // Ispiši AS4 ACK XML ako postoji
+        System.out.println("🔁 Odgovor Domibusa:\n" + response);
+
+        conn.disconnect();
+        return response;
+    }
+
+    // Pomoćna metoda za čitanje HTTP streama u string
+    private String readStream(InputStream inputStream) throws IOException {
+        if (inputStream == null) return "";
+        BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8));
+        StringBuilder sb = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) {
+            sb.append(line).append("\n");
+        }
+        reader.close();
+        return sb.toString();
+    }
+}
+public class TestAs4Send {
+    public static void main(String[] args) throws Exception {
+
+        As4MessageService as4Service = new As4MessageService();
+
+        // TODO: zamijeni stvarnim podacima
+        byte[] xmlBytes = "<Invoice>...</Invoice>".getBytes(StandardCharsets.UTF_8);
+        String senderOib = "12345678901";
+        String receiverOib = "10987654321";
+        String docId = "INV-2025-0001";
+
+        byte[] as4Message = as4Service.createAndSignAs4Invoice(xmlBytes, senderOib, receiverOib, docId);
+
+        SendAs4Service sender = new SendAs4Service();
+
+        // TODO: promijeni URL u tvoj Domibus endpoint
+        String endpoint = "http://localhost:8080/domibus/services/msh";
+
+        sender.sendToDomibus(as4Message, endpoint);
     }
 }
 
-
-return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
-       "<StandardBusinessDocumentHeader xmlns=\"http://www.unece.org/cefact/namespaces/StandardBusinessDocumentHeader\">\n" +
-       "  <HeaderVersion>1.0</HeaderVersion>\n" +
-       "  <Sender><Identifier Authority=\"HR:OIB\">" + senderOib + "</Identifier></Sender>\n" +
-       "  <Receiver><Identifier Authority=\"HR:OIB\">" + receiverOib + "</Identifier></Receiver>\n" +
-       "  <DocumentIdentification>\n" +
-       "    <Standard>UBL</Standard>\n" +
-       "    <Type>Invoice</Type>\n" +
-       "    <TypeVersion>2.1</TypeVersion>\n" +
-       "    <InstanceIdentifier>" + invoiceId + "</InstanceIdentifier>\n" +
-       "    <CreationDateAndTime>" + currentUtc() + "</CreationDateAndTime>\n" +
-       "  </DocumentIdentification>\n" +
-       "  <BusinessScope>\n" +
-       "    <Scope>\n" +
-       "      <Type>PROCESSID</Type>\n" +
-       "      <InstanceIdentifier>urn:fdc:peppol.eu:poacc:billing:3</InstanceIdentifier>\n" +
-       "    </Scope>\n" +
-       "  </BusinessScope>\n" +
-       "</StandardBusinessDocumentHeader>";
-
+    
