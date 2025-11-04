@@ -367,3 +367,17 @@ public class TestAs4Send {
     }
   ]
 }
+
+123
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "java",
+      "name": "Attach to Tomcat",
+      "request": "attach",
+      "hostName": "localhost",
+      "port": 8000
+    }
+  ]
+}
