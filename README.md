@@ -351,4 +351,19 @@ public class TestAs4Send {
     }
 }
 
-    
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "tomcat",
+      "name": "Debug Tomcat Server (Local WAR)",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "server": "Tomcat 9.0", 
+      "webApp": "${workspaceFolder}/WEBBACK/target/ime-tvoje-aplikacije.war",
+      "port": 8080,
+      "vmArgs": "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:50554",
+      "stopOnEntry": false
+    }
+  ]
+}
