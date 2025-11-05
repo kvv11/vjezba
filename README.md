@@ -1,3 +1,9 @@
+"args.vm.override.string": "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:8000 -Djava.util.logging.config.file=\"d:\\\\apache-tomcat-9.0.106-windows-x64\\\\apache-tomcat-9.0.106\\\\conf\\\\logging.properties\"",
+
+
+
+
+
 import org.json.JSONObject;
 
 import javax.activation.DataHandler;
