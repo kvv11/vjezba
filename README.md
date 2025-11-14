@@ -21,3 +21,15 @@ String accessPointOIB = xp.evaluate(
         "/*[local-name()='AccessPointOIB']/text()",
         doc
 );
+
+aa
+
+Document doc = null;
+try {
+    DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+    factory.setNamespaceAware(true);
+    DocumentBuilder builder = factory.newDocumentBuilder();
+    doc = builder.parse(new ByteArrayInputStream(xmlBytes));
+} catch (Exception e) {
+    throw new RuntimeException(e);
+}
