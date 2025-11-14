@@ -1,1 +1,23 @@
-byte[] xmlBytes = ("<Envelope><EndpointURL>https://test-endpoint.hr/service</EndpointURL><ParticipantIdentifier scheme=\"iso6523-actorid-upis\">9934:123456789</ParticipantIdentifier></Envelope>").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+String xml = new String(xmlBytes, StandardCharsets.UTF_8);
+
+String participant = xml.split("<ParticipantIdentifier")[1]    // uzmi sve nakon otvarajućeg taga + atributa
+                        .split("</ParticipantIdentifier>")[0]; // odreži do zatvarajućeg taga
+
+participant = participant.substring(participant.indexOf('>') + 1).trim();
+
+byte[] xmlBytes = ...;
+
+DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+factory.setNamespaceAware(true);
+DocumentBuilder builder = factory.newDocumentBuilder();
+
+Document doc = builder.parse(new ByteArrayInputStream(xmlBytes));
+
+XPath xp = XPathFactory.newInstance().newXPath();
+
+String accessPointOIB = xp.evaluate(
+        "/*[local-name()='SignedServiceMetaData']" +
+        "/*[local-name()='ServiceMetadata']" +
+        "/*[local-name()='AccessPointOIB']/text()",
+        doc
+);
