@@ -1,21 +1,23 @@
-import java.time.*;
-import java.time.format.DateTimeFormatter;
+public static String normalizeDate(String date) {
 
-public class DateUtil {
-
-    private static final DateTimeFormatter OUTPUT =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
-                    .withZone(ZoneOffset.UTC);
-
-    public static String normalizeToSecondsUTC(String input) {
-
-        // već je u ispravnom formatu sa sekundama i Z
-        if (input.matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z")) {
-            return input;
-        }
-
-        // bez sekundi (yyyy-MM-ddTHH:mm)
-        LocalDateTime ldt = LocalDateTime.parse(input);
-        return OUTPUT.format(ldt.toInstant(ZoneOffset.UTC));
+    // već ispravno
+    if (date.matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z")) {
+        return date;
     }
+
+    String d = date.endsWith("Z")
+            ? date.substring(0, date.length() - 1)
+            : date;
+
+    // osiguraj T
+    if (d.length() > 10 && d.charAt(10) == ' ') {
+        d = d.replace(' ', 'T');
+    }
+
+    // cilj: yyyy-MM-ddTHH:mm:ss  → 19 znakova
+    String target = "yyyy-MM-ddTHH:mm:ss";
+
+    d = (d + "T00:00:00").substring(0, 19);
+
+    return d + "Z";
 }
